@@ -19,6 +19,7 @@ from pypdf.errors import DeprecationError, LimitReachedError
 from pypdf.filters import JBIG2Decode
 from pypdf.generic import (
     ArrayObject,
+    ByteStringObject,
     ContentStream,
     DecodedStreamObject,
     DictionaryObject,
@@ -659,6 +660,61 @@ def test_low_bit_devicergb_image_without_filter():
     assert img.tobytes() == bytes(
         [255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255]
     )
+
+
+INDEXED_RED_GREEN_BLUE = ArrayObject(
+    [
+        NameObject("/Indexed"),
+        NameObject("/DeviceRGB"),
+        NumberObject(2),
+        ByteStringObject(b"\xff\x00\x00\x00\xff\x00\x00\x00\xff"),
+    ]
+)
+
+
+@pytest.mark.parametrize("compress", [False, True])
+def test_indexed_image_without_filter(compress):
+    """The lookup table of an /Indexed image applies without a filter (#4317)."""
+    image = DecodedStreamObject()
+    image.set_data(bytes([0, 1, 2]))
+    image[NameObject("/Type")] = NameObject("/XObject")
+    image[NameObject("/Subtype")] = NameObject("/Image")
+    image[NameObject("/Width")] = NumberObject(3)
+    image[NameObject("/Height")] = NumberObject(1)
+    image[NameObject("/BitsPerComponent")] = NumberObject(8)
+    image[NameObject("/ColorSpace")] = INDEXED_RED_GREEN_BLUE
+    if compress:
+        image = image.flate_encode()
+
+    writer = PdfWriter()
+    page = writer.add_blank_page(20, 20)
+    page[NameObject("/Resources")] = DictionaryObject(
+        {NameObject("/XObject"): DictionaryObject({NameObject("/Im0"): writer._add_object(image)})}
+    )
+    output = BytesIO()
+    writer.write(output)
+
+    img = PdfReader(output).pages[0].images[0].image
+    assert img.mode == "RGB"
+    assert img.tobytes() == bytes([255, 0, 0, 0, 255, 0, 0, 0, 255])
+
+
+def test_indexed_inline_image_with_named_color_space():
+    """An inline image can use an /Indexed color space of the page resources (#4317)."""
+    writer = PdfWriter()
+    page = writer.add_blank_page(20, 20)
+    page[NameObject("/Resources")] = DictionaryObject(
+        {NameObject("/ColorSpace"): DictionaryObject({NameObject("/CS0"): INDEXED_RED_GREEN_BLUE})}
+    )
+    content = DecodedStreamObject()
+    content.set_data(b"q 3 0 0 1 0 0 cm BI /W 3 /H 1 /BPC 8 /CS /CS0 ID \x00\x01\x02 EI Q")
+    page[NameObject("/Contents")] = writer._add_object(content)
+    output = BytesIO()
+    writer.write(output)
+
+    img = PdfReader(output).pages[0].images[0].image
+    assert img.mode == "RGB"
+    assert img.tobytes() == bytes([255, 0, 0, 0, 255, 0, 0, 0, 255])
 
 
 @pytest.mark.enable_socket

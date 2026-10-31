@@ -674,14 +674,17 @@ def _xobj_to_image(
     elif mode == "":
         raise PdfReadError(f"ColorSpace field not found in {x_object}")
     else:
-        # Images without a filter (for example inline images) reach Pillow
-        # directly, so low-bit samples have to be expanded here as well.
-        mode, data = _expand_low_bit_samples(mode, size, data, color_space)
-        img, image_format, extension, invert_color = (
-            _image_from_bytes(mode, size, data),
-            "PNG",
-            ".png",
-            False,
+        # Images without a filter (for example inline images) have samples
+        # that are already decoded, like those of a /FlateDecode image. They
+        # need the same handling: low-bit samples are expanded and the lookup
+        # table of an /Indexed color space is applied.
+        img, image_format, extension, invert_color = _handle_flate(
+            size,
+            data,
+            mode,
+            color_space,
+            colors,
+            obj_as_text,
         )
 
     img = _apply_decode(img, x_object, last_filter, color_space, invert_color)
