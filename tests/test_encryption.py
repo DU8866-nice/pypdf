@@ -139,6 +139,65 @@ def test_pdf_with_both_passwords(name, user_passwd, owner_passwd):
     assert len(ipdf.pages) == 1
 
 
+def _build_pdf_with_encrypt_dict(encrypt_body: bytes) -> bytes:
+    """Minimal PDF with an /Encrypt dictionary in the trailer."""
+    objs = [
+        b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
+        b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
+        b"3 0 obj\n<< /Type /Page /MediaBox [0 0 10 10] /Parent 2 0 R >>\nendobj\n",
+        b"4 0 obj\n<< " + encrypt_body + b" >>\nendobj\n",
+    ]
+    pdf = bytearray(b"%PDF-1.4\n")
+    offsets = []
+    for obj in objs:
+        offsets.append(len(pdf))
+        pdf += obj
+    xref_pos = len(pdf)
+    pdf += b"xref\n0 5\n0000000000 65535 f \n"
+    for offset in offsets:
+        pdf += b"%010d 00000 n \n" % offset
+    pdf += b"trailer\n<< /Size 5 /Root 1 0 R /Encrypt 4 0 R >>\nstartxref\n%d\n%%%%EOF\n" % xref_pos
+    return bytes(pdf)
+
+
+@pytest.mark.parametrize(
+    ("encrypt_body", "match"),
+    [
+        # /Length 0.
+        (
+            b"/Filter /Standard /V 2 /R 3 /P -4 /O <%(h)s> /U <%(h)s> /Length 0",
+            r"^Invalid encryption key length: 0 bits$",
+        ),
+        # /Length not a whole number of bytes.
+        (
+            b"/Filter /Standard /V 2 /R 3 /P -4 /O <%(h)s> /U <%(h)s> /Length 36",
+            r"^Invalid encryption key length: 36 bits$",
+        ),
+        # Legacy handler lengths cannot exceed 128 bits.
+        (
+            b"/Filter /Standard /V 2 /R 3 /P -4 /O <%(h)s> /U <%(h)s> /Length 136",
+            r"^Invalid encryption key length: 136 bits$",
+        ),
+        (
+            b"/Filter /Standard /V 2 /R 3 /P -4 /O <%(h)s> /U <%(h)s> /Length 248",
+            r"^Invalid encryption key length: 248 bits$",
+        ),
+    ],
+    ids=[
+        "zero_length",
+        "unaligned_length",
+        "over_128_bits",
+        "unsupported_248_bits",
+    ],
+)
+def test_encryption_dictionary__invalid_key_length(encrypt_body, match):
+    """Unsupported key lengths raise PdfReadError, not builtins."""
+    hex32 = b"0" * 64
+    pdf = _build_pdf_with_encrypt_dict(encrypt_body % {b"h": hex32})
+    with pytest.raises(PdfReadError, match=match):
+        PdfReader(BytesIO(pdf))
+
+
 @pytest.mark.skipif(not HAS_AES, reason="No AES implementation")
 def test_aesv2_without_length_in_encrypt_dict():
     """
@@ -808,6 +867,41 @@ def test_v4_encryption_without_crypt_filters():
     )
     reader = PdfReader(stream, password="asdfzxcv")
     assert len(reader.pages) == 1
+
+
+@pytest.mark.parametrize(
+    "crypt_filter_length",
+    [b"/Length 16 >>", b"/Length 128>>"],
+    ids=["bytes", "bits"],
+)
+@pytest.mark.skipif(not HAS_AES, reason="No AES implementation")
+def test_aesv2_crypt_filter_length_in_bytes_or_bits(crypt_filter_length):
+    """The /Length of an AESV2 crypt filter can be given in bytes or in bits."""
+    # https://github.com/py-pdf/pypdf/issues/4260
+    stream = _read_mutated_pdf(
+        "r4-aes-user-password.pdf", [(b"/AESV2 /Length 16 >>", b"/AESV2 " + crypt_filter_length)]
+    )
+    reader = PdfReader(stream, password="asdfzxcv")
+    assert reader._encryption.Length == 128
+    assert reader.metadata["/Author"] == "cheng"
+
+
+@pytest.mark.parametrize(
+    ("crypt_filter_length", "key_bits"),
+    [
+        (b"/Length 0  >>", 0),
+        (b"/Length 17 >>", 136),
+        (b"/Length 129>>", 129),
+        (b"/Length 192>>", 192),
+    ],
+)
+def test_aesv2_crypt_filter__invalid_key_length(crypt_filter_length, key_bits):
+    """Unsupported AESV2 crypt filter lengths raise PdfReadError."""
+    stream = _read_mutated_pdf(
+        "r4-aes-user-password.pdf", [(b"/AESV2 /Length 16 >>", b"/AESV2 " + crypt_filter_length)]
+    )
+    with pytest.raises(PdfReadError, match=f"^Invalid encryption key length: {key_bits} bits$"):
+        PdfReader(stream, password="asdfzxcv")
 
 
 @pytest.mark.parametrize(
